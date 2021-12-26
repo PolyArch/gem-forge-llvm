@@ -2919,6 +2919,17 @@ bool CodeGenFunction::EmitOMPWorksharingLoop(
         EmitOMPHelperVar(*this, cast<DeclRefExpr>(S.getStrideVariable()));
     LValue IL =
         EmitOMPHelperVar(*this, cast<DeclRefExpr>(S.getIsLastIterVariable()));
+    /**
+     * Zhengrong: Originally OpenMP uses UB as the upper bound for the
+     * inner loop. However, since UB is passed to kmpc_static_init,
+     * it prevents LLVM to promote it to register.
+     * To handle this, we use a separate UBInit for kmpc_static_init and
+     * copy that to UB. 
+     */
+    QualType UBTy = S.getUpperBoundVariable()->getType();
+    LValue UBInit =
+        this->MakeAddrLValue(this->CreateMemTemp(UBTy, ".omp.ub_init."), UBTy);
+    // this->EmitStoreThroughLValue(RValue::get(Init), UBInit, /*isInit*/ true);
 
     // Emit 'then' code.
     {
@@ -3001,21 +3012,26 @@ bool CodeGenFunction::EmitOMPWorksharingLoop(
                   CGF.LoopStack.setParallel(/*Enable=*/true);
               }
             },
-            [IVSize, IVSigned, Ordered, IL, LB, UB, ST, StaticChunkedOne, Chunk,
-             &S, ScheduleKind, LoopExit,
+            [IVSize, IVSigned, Ordered, IL, LB, UB, UBInit, ST,
+             StaticChunkedOne, Chunk, &S, ScheduleKind, LoopExit,
              &LoopScope](CodeGenFunction &CGF, PrePostActionTy &) {
               // OpenMP [2.7.1, Loop Construct, Description, table 2-1]
               // When no chunk_size is specified, the iteration space is divided
               // into chunks that are approximately equal in size, and at most
               // one chunk is distributed to each thread. Note that the size of
               // the chunks is unspecified in this case.
+              CGF.EmitStoreOfScalar(
+                CGF.EmitLoadOfScalar(UB, S.getBeginLoc()), UBInit);
               CGOpenMPRuntime::StaticRTInput StaticInit(
                   IVSize, IVSigned, Ordered, IL.getAddress(CGF),
-                  LB.getAddress(CGF), UB.getAddress(CGF), ST.getAddress(CGF),
+                  LB.getAddress(CGF), UBInit.getAddress(CGF), ST.getAddress(CGF),
                   StaticChunkedOne ? Chunk : nullptr);
               CGF.CGM.getOpenMPRuntime().emitForStaticInit(
                   CGF, S.getBeginLoc(), S.getDirectiveKind(), ScheduleKind,
                   StaticInit);
+              // UB = UBInit.
+              CGF.EmitStoreOfScalar(
+                CGF.EmitLoadOfScalar(UBInit, S.getBeginLoc()), UB);
               // UB = min(UB, GlobalUB);
               if (!StaticChunkedOne)
                 CGF.EmitIgnoredExpr(S.getEnsureUpperBound());
