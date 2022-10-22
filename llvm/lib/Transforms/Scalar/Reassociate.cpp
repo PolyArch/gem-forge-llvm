@@ -2485,6 +2485,9 @@ namespace {
     bool runOnFunction(Function &F) override {
       if (skipFunction(F))
         return false;
+      
+      if (F.hasFnAttribute(llvm::Attribute::NoReassocExpr))
+        return false;
 
       FunctionAnalysisManager DummyFAM;
       auto PA = Impl.run(F, DummyFAM);

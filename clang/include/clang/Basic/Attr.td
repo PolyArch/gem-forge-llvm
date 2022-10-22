@@ -1640,6 +1640,12 @@ def NoLoopIdiom : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+def NoReassocExpr : InheritableAttr {
+  let Spellings = [Clang<"noreassocexpr">, Declspec<"noreassocexpr">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+}
+
 def NoMips16 : InheritableAttr, TargetSpecificAttr<TargetMips32> {
   let Spellings = [GCC<"nomips16">];
   let Subjects = SubjectList<[Function], ErrorDiag>;

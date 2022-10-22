@@ -932,6 +932,7 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
       case Attribute::UWTable:
       case Attribute::NoCfCheck:
       case Attribute::NoLoopIdiom:
+      case Attribute::NoReassocExpr:
         break;
       }
 

@@ -379,6 +379,8 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     return "noinline";
   if (hasAttribute(Attribute::NoLoopIdiom))
     return "noloopidiom";
+  if (hasAttribute(Attribute::NoReassocExpr))
+    return "noreassocexpr";
   if (hasAttribute(Attribute::NonLazyBind))
     return "nonlazybind";
   if (hasAttribute(Attribute::NoMerge))

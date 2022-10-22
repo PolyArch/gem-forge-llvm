@@ -109,6 +109,9 @@ def NoInline : EnumAttr<"noinline">;
 /// Disable loop idiom recognition.
 def NoLoopIdiom : EnumAttr<"noloopidiom">;
 
+/// Disable reassociate expr.
+def NoReassocExpr : EnumAttr<"noreassocexpr">;
+
 /// Function is called early and/or often, so lazy binding isn't worthwhile.
 def NonLazyBind : EnumAttr<"nonlazybind">;
 

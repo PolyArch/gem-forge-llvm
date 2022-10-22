@@ -1292,7 +1292,8 @@ static uint64_t getRawAttributeMask(Attribute::AttrKind Val) {
   case Attribute::NoFree:
     return 1ULL << 63;
   case Attribute::NoLoopIdiom:
-    llvm_unreachable("noloopidiom attribute not supported in raw format");
+  case Attribute::NoReassocExpr:
+    llvm_unreachable("noloopidiom/noreassocexpr attribute not supported in raw format");
     break;
   default:
     // Other attributes are not supported in the raw format,
@@ -1308,6 +1309,8 @@ static void addRawAttributeValue(AttrBuilder &B, uint64_t Val) {
   for (Attribute::AttrKind I = Attribute::None; I != Attribute::EndAttrKinds;
        I = Attribute::AttrKind(I + 1)) {
     if (I == Attribute::NoLoopIdiom)
+      continue;
+    if (I == Attribute::NoReassocExpr)
       continue;
     if (uint64_t A = (Val & getRawAttributeMask(I))) {
       if (I == Attribute::Alignment)
@@ -1452,6 +1455,8 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::NoInline;
   case bitc::ATTR_KIND_NO_LOOP_IDIOM:
     return Attribute::NoLoopIdiom;
+  case bitc::ATTR_KIND_NO_REASSOC_EXPR:
+    return Attribute::NoReassocExpr;
   case bitc::ATTR_KIND_NO_RECURSE:
     return Attribute::NoRecurse;
   case bitc::ATTR_KIND_NO_MERGE:

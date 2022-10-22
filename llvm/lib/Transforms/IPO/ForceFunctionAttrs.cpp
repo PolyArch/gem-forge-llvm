@@ -48,6 +48,7 @@ static Attribute::AttrKind parseAttrKind(StringRef Kind) {
       .Case("noimplicitfloat", Attribute::NoImplicitFloat)
       .Case("noinline", Attribute::NoInline)
       .Case("noloopidiom", Attribute::NoLoopIdiom)
+      .Case("noreassocexpr", Attribute::NoReassocExpr)
       .Case("nonlazybind", Attribute::NonLazyBind)
       .Case("noredzone", Attribute::NoRedZone)
       .Case("noreturn", Attribute::NoReturn)

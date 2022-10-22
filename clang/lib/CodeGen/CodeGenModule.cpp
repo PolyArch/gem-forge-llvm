@@ -1681,10 +1681,12 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
 
     /**
      * ! SSP Hack.
-     * Populate NoLoopIdiom attribute.
+     * Populate NoLoopIdiom/NoReassocExpr attribute.
      */
     if (D->hasAttr<NoLoopIdiomAttr>())
       B.addAttribute(llvm::Attribute::NoLoopIdiom);
+    if (D->hasAttr<NoReassocExprAttr>())
+      B.addAttribute(llvm::Attribute::NoReassocExpr);
   }
 
   F->addAttributes(llvm::AttributeList::FunctionIndex, B);

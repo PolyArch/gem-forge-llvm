@@ -651,6 +651,7 @@ enum AttributeKindCodes {
   ATTR_KIND_NOUNDEF = 68,
   ATTR_KIND_BYREF = 69,
   ATTR_KIND_NO_LOOP_IDIOM = 70,
+  ATTR_KIND_NO_REASSOC_EXPR = 71,
 };
 
 enum ComdatSelectionKindCodes {
