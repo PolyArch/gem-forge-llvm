@@ -1046,6 +1046,44 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
   if (S.getInit())
     EmitStmt(S.getInit());
 
+  // A simple hack to support pre-emit non constants
+  std::map<const Attr *, std::pair<llvm::Value *, llvm::Value *>> Emitted;
+  for (const auto *Attr : ForAttrs) {
+    if (const auto *SA = dyn_cast<SSDfgAttr>(Attr)) {
+      if (SA->getType() != SSDfgAttr::HintType::Unroll && SA->getValue() != nullptr) {
+        if (SA->getValue()->getStmtClass() == Stmt::StmtClass::OMPArraySectionExprClass) {
+          auto *E = static_cast<OMPArraySectionExpr*>(SA->getValue());
+          auto LB = EmitOMPArraySectionExpr(E, true);
+          auto UB = EmitOMPArraySectionExpr(E, false);
+          Emitted[Attr] = std::make_pair(LB.getPointer(*this), UB.getPointer(*this));
+        } else {
+          auto LV = EmitLValue(SA->getValue());
+          Emitted[Attr] = std::make_pair(LV.getPointer(*this), nullptr);
+        }
+      }
+    } else if (const auto *SSD = dyn_cast<SSDataStreamAttr>(Attr)) {
+      std::vector<llvm::Value*> Args;
+      std::vector<Expr*> Raw(SSD->value().begin(), SSD->value().end());
+      if (Raw.size() == 2) {
+        auto RArray = EmitLValue(Raw[0]);
+        auto RLength = EmitAnyExpr(Raw[1]);
+        llvm::Value *Array = RArray.getPointer(*this);
+        auto *Length = RLength.isScalar() ? RLength.getScalarVal() : RLength.getAggregatePointer();
+        Length = Builder.CreateIntCast(Length, Builder.getInt64Ty(), true);
+        if (!isa<llvm::GlobalValue>(Array)) {
+          Array = Builder.CreateLoad(RArray.getAddress(*this));
+        }
+        auto *Ptr = Builder.CreateBitCast(Array, Builder.getInt8PtrTy());
+        static auto *FI =
+          llvm::Intrinsic::getDeclaration(&CGM.getModule(), llvm::Intrinsic::ss_fifo);
+        auto *Call = Builder.CreateCall(FI, {Ptr, Length});
+        (void) Call;
+      } else {
+        assert(Raw.empty());
+      }
+    }
+  }
+
   // Start the loop with a block that tests the condition.
   // If there's an increment, the continue scope will be overwritten
   // later.
@@ -1055,27 +1093,10 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
 
   const SourceRange &R = S.getSourceRange();
 
-  // A simple hack to support pre-emit non constants
-  std::map<const Attr *, std::pair<llvm::Value *, llvm::Value *>> Emitted;
-  for (auto Attr : ForAttrs) {
-    if (auto SA = dyn_cast<SSDfgAttr>(Attr)) {
-      if (SA->getType() != SSDfgAttr::HintType::Unroll && SA->getValue() != nullptr) {
-        if (SA->getValue()->getStmtClass() == Stmt::StmtClass::OMPArraySectionExprClass) {
-          auto E = static_cast<OMPArraySectionExpr*>(SA->getValue());
-          auto LB = EmitOMPArraySectionExpr(E, true);
-          auto UB = EmitOMPArraySectionExpr(E, false);
-          Emitted[Attr] = std::make_pair(LB.getPointer(*this), UB.getPointer(*this));
-        } else {
-          auto LV = EmitLValue(SA->getValue());
-          Emitted[Attr] = std::make_pair(LV.getPointer(*this), nullptr);
-        }
-      }
-    }
-  }
 
   LoopStack.push(CondBlock, CGM.getContext(), CGM.getCodeGenOpts(), ForAttrs,
                  SourceLocToDebugLoc(R.getBegin()),
-                 SourceLocToDebugLoc(R.getEnd()), Emitted);
+                 SourceLocToDebugLoc(R.getEnd()));
 
   // If the for loop doesn't have an increment we can just use the
   // condition as the continue block.  Otherwise we'll need to create

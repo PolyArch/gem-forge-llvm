@@ -5,7 +5,7 @@
 #include "./llvm_common.h"
 
 #include "DFGAnalysis.h"
-#include "Transformation.h"
+#include "DFGIR.h"
 #include "Util.h"
 
 namespace dsa {
@@ -29,8 +29,7 @@ std::vector<utils::StickyRegister> injectDSARegisterFile(Function &F);
  * \param os Where the given DFG is emitted. If null, dump to the filename of
  * the given DFGFile.
  */
-void emitDFG(raw_ostream &OS, DFGFile *DF, std::vector<analysis::CoalMemoryInfo> &DSUs,
-             analysis::SpadInfo &SI);
+void emitDFG(raw_ostream &OS, DFGFile *DFG, analysis::DFGAnalysisResult &DAR, CodeGenContext &CGC);
 
 struct CodeGenContext {
   /*!
@@ -53,6 +52,10 @@ struct CodeGenContext {
    * \brief Instruction domination.
    */
   DominatorTree *DT;
+  /*!
+   * \brief Block frequency.
+   */
+  BlockFrequencyInfo *BFI;
   /*!
    * \brief Loop information.
    */
@@ -86,8 +89,8 @@ struct CodeGenContext {
   };
 
   CodeGenContext(IRBuilder<> *IB, const RegisterFile &Regs, ScalarEvolution &SE, SCEVExpander &SEE,
-                 DominatorTree *DT, LoopInfo *LI) :
-    IB(IB), Regs(Regs), SE(SE), SEE(SEE), DT(DT), LI(LI) {}
+                 DominatorTree *DT, LoopInfo *LI, BlockFrequencyInfo *BFI) :
+    IB(IB), Regs(Regs), SE(SE), SEE(SEE), DT(DT), BFI(BFI), LI(LI) {}
 
   /*!
    * \brief Inject load/store instructions so that the compiler can
@@ -123,7 +126,7 @@ struct CodeGenContext {
   }
 
   void INTRINSIC_RRI(std::string Mnemonic, REG A, REG B, int C) { // NOLINT
-    injectFusionHints(Mnemonic, A, B, C);
+    // injectFusionHints(Mnemonic, A, B, C);
     intrinsicImpl(Mnemonic, "r,r,i",
                   {A.value(IB), B.value(IB), IB->getInt64(C)}, IB->getVoidTy());
   }
@@ -141,6 +144,7 @@ struct CodeGenContext {
 #include "intrin_impl.h"
 };
 
+
 /*!
  * \brief Inject configuration instruction.
  * \param CGC The injection wrapper.
@@ -155,9 +159,7 @@ void injectConfiguration(CodeGenContext &CGC, analysis::ConfigInfo &CI,
  * \brief Inject stream intrinsics.
  * \param CGC The context of code injection.
  */
-void injectStreamIntrinsics(CodeGenContext &CGC, DFGFile &DF,
-                            std::vector<analysis::CoalMemoryInfo> &CMIs,
-                            analysis::SpadInfo &SI, analysis::DFGAnalysisResult &DAR);
+void injectStreamIntrinsics(CodeGenContext &CGC, DFGFile &DF, analysis::DFGAnalysisResult &DAR);
 
 /*!
  *  \brief Erase offloaded instructions.

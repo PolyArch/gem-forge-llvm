@@ -1,4 +1,5 @@
-MACRO(DFGEntry),
+// DFGEntry {
+MACRO(DFGEntry), 
 
 // Computation {
 MACRO(ComputeStarts),
@@ -21,7 +22,7 @@ MACRO(PortBase),
 MACRO(InPortStarts),
 MACRO(InputPort),
 MACRO(MemPort),
-MACRO(CoalMemPort),
+MACRO(SLPMemPort),
 MACRO(IndMemPort),
 MACRO(CtrlMemPort),
 MACRO(InputConst),
@@ -34,10 +35,14 @@ MACRO(InPortEnds),
 MACRO(OutPortStarts),
 MACRO(OutputPort),
 MACRO(PortMem),
-MACRO(CoalPortMem),
+MACRO(SLPPortMem),
 MACRO(AtomicPortMem),
 MACRO(StreamOutPort),
 MACRO(OutPortEnds),
 // }
 MACRO(PortEnds),
 // }
+
+MACRO(EntryEnds),
+// }
+

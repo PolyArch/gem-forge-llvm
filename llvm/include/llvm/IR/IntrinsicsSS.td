@@ -13,3 +13,13 @@ def int_ss_config_start : Intrinsic<[llvm_ptr_ty],
 def int_ss_config_end   : Intrinsic<[],
                                     [llvm_ptr_ty],
                                     []>;
+
+// Intrinsic marks the array to be fifo-ized
+def int_ss_fifo : Intrinsic<[],
+			    [llvm_ptr_ty, llvm_i64_ty],
+			    []>;
+
+// Intrinsic marks the size of an ss-involved array
+def int_ss_array : Intrinsic<[],
+			     [llvm_ptr_ty, llvm_i64_ty],
+			     []>;

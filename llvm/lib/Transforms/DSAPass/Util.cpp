@@ -2,18 +2,37 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include "DFGEntry.h"
-#include "Transformation.h"
+#include "DFGIR.h"
 #include "Util.h"
 
 #include <queue>
 #include <set>
+#include <sys/select.h>
 
 #define DEBUG_TYPE "stream-specialize"
+
+std::string bitwiseRename(Instruction *Inst) {
+  std::string Res = Inst->getOpcodeName();
+  std::ostringstream OSS;
+  std::map<std::string, std::string> Kv = {
+    {"shl", "LShf"},
+    {"shr", "RShf"},
+    {"and", "And"},
+    {"or", "Or"},
+  };
+  auto Iter = Kv.find(Res);
+  if (Iter != Kv.end()) {
+    OSS << Iter->second << "_U" << Inst->getType()->getScalarSizeInBits();
+    return OSS.str();
+  }
+  return std::string();
+}
 
 CallInst *createAssembleCall(Type *Ty, StringRef OpStr, StringRef Operand,
                              ArrayRef<Value *> Args, Instruction *Before) {
@@ -53,13 +72,48 @@ Value *GetLoopTripCount(ScalarEvolution *SE, SCEVExpander *Expander, Loop *Loop,
   return TripCount;
 }
 
+const std::map<std::string, std::string> IntrinsicCalls = {
+  {"sqrt", ""},
+  {"fsqrt", ""},
+  {"min64", ""},
+  {"max64", ""},
+  {"fmax64", ""},
+  {"min32", ""},
+  {"max32", ""},
+  {"min16", ""},
+  {"max16", ""},
+  {"min8", ""},
+  {"max8", ""},
+  {"div16", ""},
+  {"hladd64", "HLAdd_I64"},
+  {"hladd32x2", "HLAdd_I32x2"},
+  {"add16x4", "Add_I16x4"},
+  {"mul16x4", "Mul_I16x4"},
+  {"div16x4", "Div_I16x4"},
+  {"concat64", "Concat_I64"},
+  {"concat32", "Concat_I32"},
+  {"concat32x2", "Concat_I32x2"},
+  {"fmul32x2", "FMul_F32x2"},
+  {"fadd32x2", "FAdd_F32x2"},
+  {"fsub32x2", "FSub_F32x2"},
+  {"fhladd64", "FAdd_F32x2"}, // TODO(@Sihao): Implement these two FU later!
+  {"fhladd32x2", "FAdd_F32x2"},
+};
+
+const std::map<std::string, std::string> &spatialIntrinics() {
+  return IntrinsicCalls;
+}
+
 bool CanBeAEntry(Value *Val) {
   auto *Inst = dyn_cast<Instruction>(Val);
   if (!Inst) {
     return false;
   }
   if (auto *Call = dyn_cast<CallInst>(Inst)) {
-    return Call->getCalledFunction()->getName() == "sqrt";
+    auto Name = Call->getCalledFunction()->getName();
+    if (spatialIntrinics().find(Name.str()) != spatialIntrinics().end()) {
+      return true;
+    }
   }
   if (isa<CmpInst>(Inst)) {
     for (auto *User : Inst->users()) {
@@ -115,8 +169,10 @@ void FindEquivPHIs(Instruction *Inst, std::set<Instruction *> &Equiv) {
     Q.pop();
   }
 
-  LLVM_DEBUG(errs() << "equiv of "; Inst->dump(); for (auto I
-                                                       : Equiv) { I->dump(); });
+  DSA_LOG(EQUIV) << *Inst;
+  for (auto *I: Equiv) {
+    DSA_LOG(EQUIV) << *I;
+  }
 }
 
 int PredicateToInt(ICmpInst::Predicate Pred, bool TF, bool Reverse) {
@@ -175,6 +231,49 @@ bool isOne(Value *Val) {
 namespace dsa {
 namespace utils {
 
+std::string nameOfLLVMValue(Function &Func, Value *Val) {
+  if (Val->hasName()) {
+    return Val->getName().str();
+  }
+  ModuleSlotTracker MST(Func.getParent());
+  MST.incorporateFunction(Func);
+  std::ostringstream OSS;
+  OSS << "Array_of_" << Func.getName().str() << "_" << MST.getLocalSlot(Val);
+  return OSS.str();
+}
+
+int consumerLevel(Value *Val, const std::vector<DFGEntry*> &Entries,
+                  const std::vector<Loop*> &Loops) {
+  std::vector<Instruction*> Consumers;
+  for (auto *Entry : Entries) {
+    for (auto *Inst : Entry->underlyingInsts()) {
+      for (int i = 0; i < (int) Inst->getNumOperands(); ++i) { // NOLINT
+        if (Inst->getOperand(i) == Val) {
+          Consumers.push_back(Inst);
+        }
+      }
+    }
+  }
+  std::vector<int> Res;
+  Res.resize(Consumers.size(), -1);
+  DSA_CHECK(Consumers.size() == Res.size());
+  for (int i = 0; i < (int) Consumers.size(); ++i) { // NOLINT
+    for (int j = 0; j < (int) Loops.size(); ++j) { // NOLINT
+      if (Loops[j]->contains(Consumers[i])) {
+        Res[i] = j;
+        break;
+      }
+    }
+    DSA_CHECK(Res[i] != -1) << *Val << " used by " << *Consumers[i];
+  }
+  for (int i = 1; i < (int) Res.size(); ++i) { // NOLINT
+    if (Res[i] != Res[0]) {
+      return -1;
+    }
+  }
+  return Res[0];
+}
+
 ModuleFlags &ModuleContext() {
   static ModuleFlags Instance;
   return Instance;
@@ -196,6 +295,50 @@ std::vector<std::vector<int>> DSU2Sets(std::vector<int> &DSU) {
   return Res;
 }
 
+uint64_t TimeProfiler::currentTime() {
+  timeval TV;
+  gettimeofday(&TV, nullptr);
+  return TV.tv_sec * 1000000 + TV.tv_usec;
+}
+
+void TimeProfiler::beginRoi() {
+  TimeStack.emplace_back(currentTime(), std::vector<int>());
+}
+
+void TimeProfiler::endRoi() {
+  Buffer.emplace_back();
+  Buffer.back().TimeEllapsed = currentTime() - TimeStack.back().first;
+  Buffer.back().Child = TimeStack.back().second;
+  TimeStack.pop_back();
+  if (!TimeStack.empty()) {
+    TimeStack.back().second.push_back(Buffer.size() - 1);
+  }
+}
+
+void TimeProfiler::dfsImpl(int X, std::ostringstream &OSS) {
+  if (!Buffer[X].Child.empty()) {
+    OSS << "(" << Buffer[X].TimeEllapsed << ": ";
+    int First = true;
+    for (auto Elem : Buffer[X].Child) {
+      if (!First) {
+        OSS << ", ";
+      }
+      First = false;
+      dfsImpl(Elem, OSS);
+    }
+    OSS << ")";
+  } else {
+    OSS << Buffer[X].TimeEllapsed;
+  }
+}
+
+std::string TimeProfiler::toString() {
+  std::ostringstream OSS;
+  OSS << "Profiled Time: ";
+  DSA_CHECK(TimeStack.empty());
+  dfsImpl(Buffer.size() - 1, OSS);
+  return OSS.str();
+}
 
 } // namespace utils
 } // namespace dsa
@@ -243,3 +386,37 @@ raw_ostream &operator<<(raw_ostream &OS, DFGEntry &DE) {
   }
   return OS;
 }
+
+Value *stripCast(Value *V) {
+  while (auto *CI = dyn_cast<CastInst>(V)) {
+    V = CI->getOperand(0);
+  }
+  return V;
+}
+
+const SCEV *stripCast(const SCEV *SE) {
+  while (auto *SCE = dyn_cast<SCEVCastExpr>(SE)) {
+    SE = SCE->getOperand(0);
+  }
+  return SE;
+}
+
+
+void traverseAndApply(Instruction *Start, Instruction *Terminator, DominatorTree *DT,
+                      std::function<void(Instruction*)> F) {
+  DSA_CHECK(DT->dominates(Start, Terminator));
+  for (auto *BB : breadth_first(Start->getParent())) {
+    if (DT->dominates(Start, BB) || BB == Start->getParent()) {
+      auto *Begin = BB == Start->getParent() ? Start : &BB->front();
+      auto *End = BB == Terminator->getParent() ? Terminator : &BB->back();
+      DSA_LOG(TRAVERSE) << BB->getName();
+      for (auto *I = Begin; I != End; I = I->getNextNode()) {
+        DSA_LOG(TRAVERSE) << *I;
+        F(I);
+      }
+      F(End);
+    }
+  }
+}
+
+

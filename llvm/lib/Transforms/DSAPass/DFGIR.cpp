@@ -24,8 +24,9 @@
 #include "llvm/Transforms/Utils/UnrollLoop.h"
 
 #include "CodeXform.h"
+#include "DFGEntry.h"
+#include "DFGIR.h"
 #include "StreamAnalysis.h"
-#include "Transformation.h"
 #include "Util.h"
 
 #include "dsa-ext/rf.h"
@@ -64,43 +65,6 @@ bool CheckLoopInvariant(const SCEV *S, int From, // NOLINT
     }
   }
   return true;
-}
-
-Value *DFGBase::ComputeRepeat(Value *Prime, Value *Wrapper, bool IsVectorized,
-                              bool IsPortConfig) {
-  SCEVExpander Expander(*Parent->Query->SE,
-                        Parent->Func.getParent()->getDataLayout(), "");
-  auto &IB = *Parent->Query->IBPtr;
-  if (IB.GetInsertPoint() != DefaultIP()->getIterator())
-    IB.SetInsertPoint(DefaultIP());
-  if (IsVectorized) {
-    if (IsPortConfig) {
-      if (isOne(Wrapper)) {
-        auto *ShiftedPrime = IB.CreateShl(Prime, 3);
-        auto *VectorizedPrime = IB.CreateUDiv(ShiftedPrime, UnrollConstant());
-        return VectorizedPrime;
-      }
-      auto *CD = CeilDiv(Prime, UnrollConstant(), DefaultIP());
-      return IB.CreateShl(IB.CreateMul(CD, Wrapper), 3);
-    }
-    auto *CD = CeilDiv(Prime, UnrollConstant(), DefaultIP());
-    return IB.CreateMul(CD, Wrapper);
-  }
-  auto *Res = IB.CreateMul(Prime, Wrapper);
-  if (IsPortConfig) {
-    return IB.CreateShl(Res, 3);
-  }
-  return Res;
-}
-
-Value *DFGBase::ComputeRepeat(const AnalyzedRepeat &AR, bool IsVectorized,
-                              bool IsPortConfig) {
-  SCEVExpander Expander(*Parent->Query->SE,
-                        Parent->Func.getParent()->getDataLayout(), "");
-  if (!AR.Prime)
-    return createConstant(getCtx(), 1);
-  return ComputeRepeat(Expander.expandCodeFor(AR.Prime, nullptr, DefaultIP()),
-                       AR.Wrapped, IsVectorized, IsPortConfig);
 }
 
 /// Chech if a SCEV can be a repeat stretch
@@ -156,9 +120,11 @@ Instruction *DFGBase::DefaultIP() { assert(false && "Not supported yet!"); }
 
 Instruction *TemporalDFG::DefaultIP() { return IP; }
 
-Instruction *DedicatedDFG::DefaultIP() { return &Preheader->back(); }
+Instruction *DedicatedDFG::DefaultIP() { 
+  return Preheader ? &Preheader->back() : nullptr;
+}
 
-bool DedicatedDFG::ConsumedByAccumulator(MemPort *MP) {
+Accumulator *DedicatedDFG::ConsumedByAccumulator(MemPort *MP) {
   std::set<Value *> Visited{MP->underlyingInst()};
   std::queue<Value *> Q;
   Q.push(MP->underlyingInst());
@@ -168,7 +134,7 @@ bool DedicatedDFG::ConsumedByAccumulator(MemPort *MP) {
     for (auto *User : Cur->users()) {
       if (auto *DE = InThisDFG(User)) {
         if (isa<Accumulator>(DE)) {
-          return true;
+          return dyn_cast<Accumulator>(DE);
         }
       }
       if (Visited.find(User) == Visited.end()) {
@@ -177,7 +143,7 @@ bool DedicatedDFG::ConsumedByAccumulator(MemPort *MP) {
       }
     }
   }
-  return false;
+  return nullptr;
 }
 
 int ScalarBits2T(int Bits) { // NOLINT
@@ -284,9 +250,9 @@ Value *DedicatedDFG::ProdTripCount(int x, Instruction *InsertBefore) { // NOLINT
 }
 
 DedicatedDFG::DedicatedDFG(DFGFile *Parent_, Loop *LI, int Unroll) // NOLINT
-    : DFGBase(Parent_), UnrollFactor(std::max(1, Unroll)) {
+    : DFGBase(Parent_), UnrollFactor(Unroll) {
 
-  Kind = DFGBase::Dedicated;
+  TyEnum = DFGBase::Dedicated;
 
   if (GetUnrollMetadata(LI->getLoopID(), "llvm.loop.ss.datamove")) {
     LLVM_DEBUG(DSA_INFO << "A data-move 'DFG'\n");
@@ -302,7 +268,7 @@ DedicatedDFG::DedicatedDFG(DFGFile *Parent_, Loop *LI, int Unroll) // NOLINT
     LoopNest.push_back(Cur->getParentLoop());
   }
 
-  CHECK(GetUnrollMetadata(LoopNest.back()->getLoopID(), "llvm.loop.ss.stream"))
+  DSA_CHECK(GetUnrollMetadata(LoopNest.back()->getLoopID(), "llvm.loop.ss.stream"))
     << "A stream level required!\n" << *LoopNest.back() << "\n" << *LoopNest.back()->getLoopID();
 
   Loop *InnerLoop = nullptr;
@@ -356,10 +322,10 @@ Loop *DedicatedDFG::OuterMost() { return LoopNest.back(); }
 
 DFGBase::DFGBase(DFGFile *Parent_) : Parent(Parent_) { // NOLINT
   ID = Parent_->DFGs.size();
-  Kind = DFGBase::Unknown;
+  TyEnum = DFGBase::Unknown;
 }
 
-DFGBase::DFGKind DFGBase::getKind() const { return Kind; }
+DFGBase::DFGKind DFGBase::getKind() const { return TyEnum; }
 
 TemporalDFG::TemporalDFG(DFGFile *Parent, IntrinsicInst *Begin,
                          IntrinsicInst *End)
@@ -382,7 +348,7 @@ TemporalDFG::TemporalDFG(DFGFile *Parent, IntrinsicInst *Begin,
     }
   }
 
-  Kind = DFGBase::Temporal;
+  TyEnum = DFGBase::Temporal;
 }
 
 void TemporalDFG::dump(std::ostringstream &OS) {
@@ -396,7 +362,7 @@ void DedicatedDFG::dump(std::ostringstream &OS) {
   if (!OS.str().empty())
     OS << "\n----\n\n";
   if (dsa::utils::ModuleContext().TRIGGER) {
-    CHECK(dsa::utils::ModuleContext().TEMPORAL)
+    DSA_CHECK(dsa::utils::ModuleContext().TemporalFound)
         << "Trigger cannot be enabled without temporal";
     OS << "#pragma group temporal\n";
   }
@@ -685,9 +651,9 @@ template <typename DFGType> void AddDFG(DFGFile *DF, MDNode *Ptr, Loop *LI) { //
   DF->addDFG(new DFGType(DF, LI, Factor));
 }
 
-DFGFile::DFGFile(StringRef Name, IntrinsicInst *Start, IntrinsicInst *End,
+DFGFile::DFGFile(IntrinsicInst *Start, IntrinsicInst *End,
                  StreamSpecialize *Query)
-    : FileName(Name), Func(*Start->getParent()->getParent()), Config(Start),
+    : Func(*Start->getParent()->getParent()), Config(Start),
       Fence(End), Query(Query) {}
 
 int getPortImpl() {
@@ -719,14 +685,14 @@ int DFGBase::getNextReserved() {
   // return Res;
 }
 
-SmallVector<BasicBlock *, 0> DedicatedDFG::getBlocks() {
-  SmallVector<BasicBlock *, 0> Res(InnerMost()->getBlocks().begin(),
-                                   InnerMost()->getBlocks().end());
+std::vector<BasicBlock *> DedicatedDFG::getBlocks() {
+  std::vector<BasicBlock *> Res(InnerMost()->getBlocks().begin(),
+                                InnerMost()->getBlocks().end());
   return Res;
 }
 
-SmallVector<BasicBlock *, 0> TemporalDFG::getBlocks() {
-  SmallVector<BasicBlock *, 0> Res{Begin->getParent()};
+std::vector<BasicBlock *> TemporalDFG::getBlocks() {
+  std::vector<BasicBlock *> Res{Begin->getParent()};
   return Res;
 }
 
@@ -754,3 +720,29 @@ bool TemporalDFG::InThisScope(Instruction *Inst) {
 void DFGBase::accept(dsa::DFGVisitor *Visitor) { Visitor->Visit(this); }
 void DedicatedDFG::accept(dsa::DFGVisitor *Visitor) { Visitor->Visit(this); }
 void TemporalDFG::accept(dsa::DFGVisitor *Visitor) { Visitor->Visit(this); }
+
+std::string DFGBase::nameOf(Value *Val, int VecIdx) {
+  auto *Entry = InThisDFG(Val);
+  DSA_CHECK(Entry) << "CANNOT find entry for " << Val << ": " << *Val;
+  auto Vs = Entry->underlyingValues();
+  auto Iter = std::find(Vs.begin(), Vs.end(), Val);
+  DSA_CHECK(Iter != Vs.end());
+  int ValueIdx = Iter - Vs.begin();
+  std::ostringstream OSS;
+  OSS << "sub" << ID << "_v" << Entry->ID << "_" << ValueIdx << "_";
+  if (VecIdx != -1 && Entry->shouldUnroll()) {
+    OSS << VecIdx;
+  }
+  return OSS.str();
+}
+
+DedicatedDFG::DedicatedDFG(DFGFile *P, dsa::analysis::SEWrapper *SW) : DFGBase(P) {
+  DSA_INFO << SW->toString();
+  auto *IP = dyn_cast<dsa::analysis::IndirectPointer>(SW);
+  DSA_CHECK(IP) << SW->toString();
+  auto *SU = dyn_cast<SCEVUnknown>(SW->Raw);
+  auto *Load = dyn_cast<LoadInst>(SU->getValue());
+  Entries.push_back(new MemPort(this, Load));
+  Entries.push_back(new OutputPort(this, Load));
+}
+

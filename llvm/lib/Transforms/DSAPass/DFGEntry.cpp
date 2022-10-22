@@ -4,8 +4,8 @@
 #include <sstream>
 
 #include "DFGEntry.h"
+#include "DFGIR.h"
 #include "StreamAnalysis.h"
-#include "Transformation.h"
 #include "Util.h"
 
 #define DEBUG_TYPE "stream-specialize"
@@ -17,9 +17,6 @@ const char *KindStr[]= {
 #include "./DFGKind.def"
 #undef MACRO
 };
-
-const int MemPort::PtrOperandIdx = 0;
-const int PortMem::PtrOperandIdx = 1;
 
 DFGEntry::DFGEntry(DFGBase *Parent_) : Parent(Parent_) { // NOLINT
   ID = Parent_->Entries.size();
@@ -39,7 +36,7 @@ Predicate *DFGEntry::getPredicate(int *X) {
           Res = Entry->getPredicate();
         } else {
           if (Entry->getPredicate()) {
-            assert(Res == Entry->getPredicate());
+            DSA_CHECK(Res == Entry->getPredicate());
           }
         }
       }
@@ -110,20 +107,33 @@ int DFGEntry::getAbstainBit() {
 }
 
 std::string DFGEntry::name(int Idx) {
-  if (Idx != -1 && shouldUnroll()) {
-    return formatv("sub{0}_v{1}_{2}", Parent->ID, ID, Idx);
+  return Parent->nameOf(underlyingValue(), Idx);
+}
+
+std::string OutputPort::name(int VecIdx) {
+  auto *Entry = this;
+  DSA_CHECK(Entry);
+  auto Vs = Entry->underlyingValues();
+  if (!isa<AtomicPortMem>(this)) {
+    DSA_CHECK(Vs.size() == 1) << Vs.size() << ": " << dump();
   }
-  return formatv("sub{0}_v{1}_", Parent->ID, ID);
+  std::ostringstream OSS;
+  OSS << "sub" << Parent->ID << "_v" << Entry->ID << "_";
+  if (VecIdx != -1 && Entry->shouldUnroll()) {
+    OSS << VecIdx;
+  }
+  return OSS.str();
 }
 
 PortBase::PortBase(DFGBase *Parent_) // NOLINT
     : DFGEntry(Parent_), SoftPortNum(-1), IntrinInjected(false) {
   Kind = kPortBase;
+  Meta.clear();
 }
 
 OutputPort::OutputPort(DFGBase *Parent_, Value *Value_) : PortBase(Parent_) { // NOLINT
   auto *Inst = dyn_cast<Instruction>(Value_);
-  assert(Inst);
+  DSA_CHECK(Inst);
 
   LLVM_DEBUG(Inst->dump());
 
@@ -157,8 +167,8 @@ PortMem::PortMem(DFGBase *Parent_, StoreInst *Store_) // NOLINT
   Kind = kPortMem;
 }
 
-Accumulator::Accumulator(DFGBase *Parent_, Instruction *Operation_, // NOLINT
-                         CtrlSignal *Ctrl_) : ComputeBody(Parent_, Operation_), Ctrl(Ctrl_) { // NOLINT
+Accumulator::Accumulator(DFGBase *Parent_, Instruction *Operation_) // NOLINT
+  : ComputeBody(Parent_, Operation_) { // NOLINT
   Kind = kAccumulator;
 }
 
@@ -175,10 +185,6 @@ ComputeBody::ComputeBody(DFGBase *Parent_, Instruction *Operation_) // NOLINT
     : DFGEntry(Parent_), Operation(Operation_) {
   assert(CanBeAEntry(Operation_));
   Kind = kComputeBody;
-}
-
-CtrlSignal::CtrlSignal(DFGBase *Parent_) : InputPort(Parent_) { // NOLINT
-  Kind = kCtrlSignal;
 }
 
 CtrlMemPort::CtrlMemPort(DFGBase *Parent_, LoadInst *Load_, Value *Start_, // NOLINT
@@ -201,12 +207,18 @@ Instruction *DFGEntry::underlyingInst() { return nullptr; }
 Value *DFGEntry::underlyingValue() { return underlyingInst(); }
 
 bool DFGEntry::isInMajor() {
-  if (!underlyingInst()) {
+  auto Insts = underlyingInsts();
+  if (Insts.empty()) {
     return false;
   }
-  for (auto *BB : Parent->getBlocks())
-    if (underlyingInst()->getParent() == BB)
+  auto Blocks = Parent->getBlocks();
+  for (auto *Elem : Insts) {
+    Elem->getParent();
+    auto Iter = std::find(Blocks.begin(), Blocks.end(), Elem->getParent());
+    if (Iter != Blocks.end()) {
       return true;
+    }
+  }
   return false;
 }
 
@@ -259,7 +271,7 @@ StreamInPort *StreamOutPort::findConsumer() {
         return SIP;
     }
   }
-  CHECK(false) << "Cannot find consumer for " << *underlyingInst();
+  DSA_CHECK(false) << "Cannot find consumer for " << *underlyingInst();
   return nullptr;
 }
 
@@ -313,13 +325,11 @@ bool ComputeBody::shouldUnroll() {
 
 bool Accumulator::shouldUnroll() { return false; }
 
-bool CtrlSignal::shouldUnroll() { return false; }
-
 bool OutputPort::shouldUnroll() {
   if (!DFGEntry::shouldUnroll())
     return false;
   auto *OV = Parent->InThisDFG(Output);
-  CHECK(OV);
+  DSA_CHECK(OV);
   return OV->shouldUnroll();
 }
 
@@ -334,8 +344,9 @@ bool MemPort::shouldUnroll() {
 bool IndMemPort::shouldUnroll() {
   if (!DFGEntry::shouldUnroll())
     return false;
-  if (auto *DD = dyn_cast<DedicatedDFG>(Parent))
+  if (auto *DD = dyn_cast<DedicatedDFG>(Parent)) {
     return !DD->InnerMost()->isLoopInvariant(Index->Load->getPointerOperand());
+  }
   return false;
 }
 
@@ -372,46 +383,13 @@ void DFGEntry::dump(std::ostringstream &OS) {
   }
 }
 
-Value *Accumulator::numValuesProduced() {
-  auto *Inst = underlyingInst();
-  CHECK(isInMajor());
-  for (size_t i = 0; i < Inst->getNumOperands(); ++i) { // NOLINT
-    if (auto *Phi = dyn_cast<PHINode>(Inst->getOperand(i))) {
-      for (size_t j = 0; j < Phi->getNumIncomingValues(); ++j) { // NOLINT
-        auto *IB = Phi->getIncomingBlock(j);
-        bool Found = false;
-        for (auto *BB : Parent->getBlocks()) {
-          if (BB == IB) {
-            Found = true;
-            break;
-          }
-        }
-        if (!Found) {
-          auto *DD = dyn_cast<DedicatedDFG>(Parent);
-          assert(DD);
-          for (size_t k = 0; k < DD->LoopNest.size(); ++k) { // NOLINT
-            if (DD->LoopNest[k]->getBlocksSet().count(IB)) {
-              return DD->ProdTripCount(
-                  k, DD->Preheader->getFirstNonPHI()->getNextNode());
-            }
-          }
-          return DD->ProdTripCount(
-              DD->LoopNest.size(),
-              DD->Preheader->getFirstNonPHI()->getNextNode());
-        }
-      }
-    }
-  }
-  assert(false);
-  return nullptr;
-}
-
 int MemPort::fillMode() {
   if (auto *DD = dyn_cast<DedicatedDFG>(Parent)) {
+    (void) DD;
     if (Parent->getUnroll() <= 1)
       return DP_NoPadding;
-    return DD->ConsumedByAccumulator(this) ? DP_PostStrideZero
-                                           : DP_PostStridePredOff;
+    return DP_PostStrideZero;
+    // return DD->ConsumedByAccumulator(this) ? DP_PostStrideZero : DP_PostStridePredOff;
   }
   return DP_NoPadding;
 }
@@ -433,7 +411,7 @@ std::string getOperationStr(Instruction *Inst, bool isAcc, bool predicated) { //
     OpStr = "compare";
     BitWidth = Cmp->getOperand(0)->getType()->getScalarSizeInBits();
   } else if (auto *Call = dyn_cast<CallInst>(Inst)) {
-    CHECK(Call);
+    DSA_CHECK(Call);
     OpStr = Call->getCalledFunction()->getName().str();
   } else {
     OpStr = Inst->getOpcodeName();
@@ -460,7 +438,7 @@ std::string ValueToOperandText(Value *Val) { // NOLINT
     return formatv("{0}", CI->getValue().getSExtValue());
   }
   auto *CFP = dyn_cast<ConstantFP>(Val);
-  CHECK(CFP);
+  DSA_CHECK(CFP);
   // TODO: Support more data types
   double FPV = CFP->getValueAPF().convertToDouble();
   uint64_t *RI = reinterpret_cast<uint64_t *>(&FPV);
@@ -617,6 +595,9 @@ void Predicate::emitCond(std::ostringstream &OS) {
 
 AtomicPortMem *ComputeBody::isAtomic() {
   for (auto *Entry : Parent->EntryFilter<AtomicPortMem>()) {
+    if (!Entry->Operand) {
+      continue;
+    }
     if (Entry->Op == underlyingInst()) {
       return Entry;
     }
@@ -663,7 +644,7 @@ int TBits(int Bits) { // NOLINT
   case 8:
     return 3;
   }
-  CHECK(false);
+  DSA_CHECK(false);
   return -1;
 }
 
@@ -671,6 +652,9 @@ int TBits(int Bits) { // NOLINT
 // If this IndMemPort is a source operand of atomic update, i.e. a[b[i]] ?= operand.
 bool IndMemPort::duplicated() {
   for (auto *Entry : Parent->EntryFilter<AtomicPortMem>()) {
+    if (!Entry->Operand) {
+      continue;
+    }
     if (Index->underlyingInst() == Entry->Index->underlyingInst()) {
       return true;
     }
@@ -713,26 +697,6 @@ int PortBase::vectorizeFactor() {
   return shouldUnroll() ? Parent->getUnroll() : 1;
 }
 
-#define VISIT_IMPL(TYPE) void TYPE::accept(dsa::DFGEntryVisitor *V) { V->Visit(this); }
-VISIT_IMPL(DFGEntry)
-VISIT_IMPL(ComputeBody)
-VISIT_IMPL(Predicate)
-VISIT_IMPL(Accumulator)
-VISIT_IMPL(PortBase)
-VISIT_IMPL(InputPort)
-VISIT_IMPL(CtrlMemPort)
-VISIT_IMPL(MemPort)
-VISIT_IMPL(CoalescedMemPort)
-VISIT_IMPL(StreamInPort)
-VISIT_IMPL(CtrlSignal)
-VISIT_IMPL(InputConst)
-VISIT_IMPL(OutputPort)
-VISIT_IMPL(PortMem)
-VISIT_IMPL(StreamOutPort)
-VISIT_IMPL(IndMemPort)
-VISIT_IMPL(AtomicPortMem)
-#undef VISIT_IMPL
-
 namespace dsa {
 
 void DFGEntryVisitor::Visit(DFGEntry *Node) {}
@@ -749,16 +713,36 @@ VISIT_IMPL(PortBase, DFGEntry)
 VISIT_IMPL(InputPort, PortBase)
 VISIT_IMPL(CtrlMemPort, InputPort)
 VISIT_IMPL(MemPort, InputPort)
-VISIT_IMPL(CoalescedMemPort, InputPort)
 VISIT_IMPL(StreamInPort, InputPort)
-VISIT_IMPL(CtrlSignal, InputPort)
 VISIT_IMPL(InputConst, InputPort)
-VISIT_IMPL(IndMemPort, InputPort)
 VISIT_IMPL(OutputPort, PortBase)
 VISIT_IMPL(PortMem, OutputPort)
 VISIT_IMPL(StreamOutPort, OutputPort)
-VISIT_IMPL(AtomicPortMem, OutputPort)
+
+void DFGEntryVisitor::Visit(IndMemPort *IMP) {
+  Visit(IMP->Index);
+  Visit(static_cast<InputPort*>(IMP));
+}
+
+void DFGEntryVisitor::Visit(AtomicPortMem *APM) {
+  Visit(APM->Index);
+  Visit(static_cast<OutputPort*>(APM));
+}
 
 #undef VISIT_IMPL
+
+#define COAL_VISIT_IMPL(Ext, Super)       \
+  void DFGEntryVisitor::Visit(Ext *SMP) { \
+    for (auto *Elem : SMP->Coal) {        \
+      Elem->accept(this);                 \
+    }                                     \
+    Visit(static_cast<Super*>(SMP));      \
+  }
+
+COAL_VISIT_IMPL(SLPMemPort, InputPort)
+COAL_VISIT_IMPL(SLPPortMem, OutputPort)
+
+#undef COAL_VISIT_IMPL
+
 
 } // namespace dsa
