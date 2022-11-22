@@ -685,6 +685,7 @@ void CodeGenFunction::EmitAttributedStmt(const AttributedStmt &S) {
      * search backwards for the first LoadInst.
      * 2. If the SubSmt is a BinaryOperation, we assume this is a StoreStream,
      * and search backwards for the first StoreInst.
+     * 3. If the SubStmt is a Call, we assume this is a StoreStream.
      */
     auto SubStmtType = S.getSubStmt()->getStmtClass();
 
@@ -725,6 +726,9 @@ void CodeGenFunction::EmitAttributedStmt(const AttributedStmt &S) {
       } else {
         // Normal StoreStream?
         if (llvm::isa<llvm::StoreInst>(Inst)) {
+          StreamInst = Inst;
+          break;
+        } else if (llvm::isa<llvm::CallInst>(Inst)) {
           StreamInst = Inst;
           break;
         }
