@@ -42,3 +42,20 @@ cmake \
 
 make install -j $CORES
 cd ..
+
+mkdir -p build-libunwind-release
+cd build-libunwind-release
+cmake -G "Unix Makefiles" \
+-DLLVM_TARGETS_TO_BUILD="X86" \
+-DLLVM_ENABLE_PROJECTS="libunwind" \
+-DLLVM_ENABLE_DSA_PASS=OFF \
+-DCMAKE_BUILD_TYPE=Release \
+-DCMAKE_INSTALL_PREFIX=$GEM_FORGE_TOP/build \
+-DLLVM_BINUTILS_INCDIR=$GEM_FORGE_TOP/lib/binutils/include \
+-DBUILD_SHARED_LIBS=ON \
+-DOPENMP_ENABLE_LIBOMPTARGET=OFF \
+../llvm \
+
+make install-unwind -j $CORES
+cd ..
+
