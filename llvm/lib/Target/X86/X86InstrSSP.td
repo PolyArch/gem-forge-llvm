@@ -116,6 +116,28 @@ def SSP_STREAM_LOAD_128: SSPSTREAMLOAD<0x3B, VR128, v2f64, "128">;
 def SSP_STREAM_LOAD_256: VSSPSTREAMLOAD<0x3C, VR256, v4f64, "256">;
 def SSP_STREAM_LOAD_512: VSSPSTREAMLOAD<0x3D, VR512, v8f64, "512">;
 
+let Predicates = [HasAMXTILE, In64BitMode] in {
+  let SchedRW = [WriteSystem] in {
+    def SSP_STREAM_TILE_LOAD
+      : ISSP<0x3E,
+             MRM0r,
+             Imm8,
+             (outs TILE:$dst),
+             (ins i64i8imm:$stream),
+             "ssp.stream.tile.ld\t{$stream, $dst|$dst, $stream}",
+             []>,
+        EVEX, EVEX_V512 {
+      Prefix OpPrefix = PS;
+    }
+    let usesCustomInserter = 1 in {
+      // Pseudo instructions, using immediates instead of tile registers.
+      // To be translated to the actual instructions in X86ISelLowering.cpp
+      def P_SSP_STREAM_TILE_LOAD
+        : PseudoI<(outs), (ins i64i8imm:$stream, u8imm:$dst), []>;
+    }
+  } // SchedRW
+} // HasAMXTILE
+
 // Used as a placeholder for stores in stream computing, as pseudo-registers are not
 // implemented yet. The store addr & value are computed by the SE, not core pipeline.
 def SSP_STREAM_STORE
